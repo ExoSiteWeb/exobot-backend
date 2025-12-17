@@ -2,12 +2,23 @@ const express = require('express');
 const axios = require('axios');
 const session = require('express-session');
 const cors = require('cors');
+const fs = require('fs');
+const path = require('path');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
 
+/* ================= CONFIG ================= */
+
 const FRONTEND_URL = 'https://exositeweb.github.io';
 const DASHBOARD_URL = 'https://exositeweb.github.io/exobot-website/dashboard.html';
+const DATA_DIR = path.join(__dirname, 'data', 'guilds');
+
+/* ================= PREP ================= */
+
+if (!fs.existsSync(DATA_DIR)) {
+  fs.mkdirSync(DATA_DIR, { recursive: true });
+}
 
 app.use(express.json());
 
@@ -63,23 +74,73 @@ app.post('/auth/callback', async (req, res) => {
       { headers: { Authorization: `Bearer ${tokenRes.data.access_token}` } }
     );
 
-    req.session.user = userRes.data;
-    res.json({ success: true, user: userRes.data });
+    req.session.user = {
+      ...userRes.data,
+      accessToken: tokenRes.data.access_token
+    };
 
+    res.json({ success: true });
   } catch (err) {
-    console.error(err.response?.data || err.message);
     res.status(500).json({ error: 'OAuth failed' });
   }
 });
 
+/* ================= HELPERS ================= */
+
+async function getBotGuilds() {
+  const res = await axios.get(
+    'https://discord.com/api/v10/users/@me/guilds',
+    { headers: { Authorization: `Bot ${process.env.DISCORD_BOT_TOKEN}` } }
+  );
+  return res.data.map(g => g.id);
+}
+
+function getSettings(guildId) {
+  const file = path.join(DATA_DIR, `${guildId}.json`);
+  if (!fs.existsSync(file)) return {};
+  return JSON.parse(fs.readFileSync(file));
+}
+
+function saveSettings(guildId, settings) {
+  const file = path.join(DATA_DIR, `${guildId}.json`);
+  fs.writeFileSync(file, JSON.stringify(settings, null, 2));
+}
+
 /* ================= API ================= */
 
 app.get('/api/me', (req, res) => {
-  if (!req.session.user) {
-    return res.status(401).json({ error: 'Not authenticated' });
-  }
+  if (!req.session.user) return res.status(401).json({});
   res.json(req.session.user);
 });
+
+app.get('/api/guilds', async (req, res) => {
+  if (!req.session.user) return res.status(401).json([]);
+
+  const userGuilds = await axios.get(
+    'https://discord.com/api/users/@me/guilds',
+    { headers: { Authorization: `Bearer ${req.session.user.accessToken}` } }
+  ).then(r => r.data);
+
+  const botGuilds = await getBotGuilds();
+
+  const filtered = userGuilds.filter(g =>
+    (g.permissions & 0x20) === 0x20 &&
+    botGuilds.includes(g.id)
+  );
+
+  res.json(filtered);
+});
+
+app.get('/api/settings/:guildId', (req, res) => {
+  res.json(getSettings(req.params.guildId));
+});
+
+app.post('/api/settings/:guildId', (req, res) => {
+  saveSettings(req.params.guildId, req.body);
+  res.json({ success: true });
+});
+
+/* ================= START ================= */
 
 app.listen(PORT, () => {
   console.log('Backend running on port ' + PORT);
